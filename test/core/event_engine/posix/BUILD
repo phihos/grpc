@@ -188,6 +188,7 @@ grpc_cc_test(
     name = "traced_buffer_list_test",
     srcs = ["traced_buffer_list_test.cc"],
     external_deps = [
+        "absl/cleanup",
         "gtest",
     ],
     tags = [

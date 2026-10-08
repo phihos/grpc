@@ -25,6 +25,7 @@
 #include "src/core/util/time.h"
 #include "gmock/gmock.h"
 #include "gtest/gtest.h"
+#include "absl/cleanup/cleanup.h"
 
 #ifdef GRPC_LINUX_ERRQUEUE
 
@@ -201,6 +202,48 @@ TEST(BufferListTest, TimedOut) {
   EXPECT_THAT(traced_buffers.Size(), Eq(0));
   TracedBufferList::TestOnlySetMaxPendingAckTime(
       grpc_core::Duration::Seconds(10));
+}
+
+// Returns a sink that adds a new entry to traced_buffers when destroyed, as a
+// sink can when it drops the last ref to a call whose teardown writes to the
+// same endpoint.
+WriteEventSink AddsEntryWhenDestroyed(TracedBufferList& traced_buffers) {
+  absl::Cleanup add_entry = [&traced_buffers] {
+    traced_buffers.AddNewEntry(
+        /*seq_no=*/2, /*posix_interface=*/nullptr, /*fd=*/FileDescriptor(),
+        WriteEventSink(nullptr, {},
+                       [](WriteEvent /*event*/, absl::Time /*time*/,
+                          std::vector<WriteMetric> /*metrics*/) {}));
+  };
+  return WriteEventSink(nullptr, {WriteEvent::kAcked},
+                        [add_entry = std::move(add_entry)](
+                            WriteEvent /*event*/, absl::Time /*time*/,
+                            std::vector<WriteMetric> /*metrics*/) {});
+}
+
+// Tests that a sink destroyed by an ack may add a new entry.
+TEST(BufferListTest, SinkDestroyedOnAckMayAddNewEntry) {
+  TracedBufferList traced_buffers;
+  traced_buffers.AddNewEntry(
+      /*seq_no=*/1, /*posix_interface=*/nullptr, /*fd=*/FileDescriptor(),
+      AddsEntryWhenDestroyed(traced_buffers));
+  struct sock_extended_err serr;
+  serr.ee_data = 1;
+  serr.ee_info = SCM_TSTAMP_ACK;
+  struct scm_timestamping tss;
+  memset(&tss, 0, sizeof(tss));
+  traced_buffers.ProcessTimestamp(&serr, nullptr, &tss);
+  EXPECT_THAT(traced_buffers.Size(), Eq(1));
+}
+
+// Tests that a sink destroyed on shutdown may add a new entry.
+TEST(BufferListTest, SinkDestroyedOnShutdownMayAddNewEntry) {
+  TracedBufferList traced_buffers;
+  traced_buffers.AddNewEntry(
+      /*seq_no=*/1, /*posix_interface=*/nullptr, /*fd=*/FileDescriptor(),
+      AddsEntryWhenDestroyed(traced_buffers));
+  traced_buffers.Shutdown(std::nullopt);
+  EXPECT_THAT(traced_buffers.Size(), Eq(1));
 }
 
 }  // namespace
